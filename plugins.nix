@@ -6,7 +6,10 @@ let
 in {
   config.vim = {
     # ── Editor UI ────────────────────────────────────────────────────────────
-    tabline.nvimBufferline.enable = true;
+    tabline.nvimBufferline = {
+      enable = true;
+      setupOpts.options.numbers = "ordinal";
+    };
 
     statusline.lualine = {
       enable = true;
