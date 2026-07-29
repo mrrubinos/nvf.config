@@ -3,6 +3,17 @@
 let
   # Helper for embedding raw lua values inside nix attrsets passed to setup().
   luaInline = expr: { _type = "lua-inline"; inherit expr; };
+
+  # .cmt/.cmi artefacts are compiler-version specific, so prefer the project's own ocamllsp.
+  ocamllsp = pkgs.writeShellScript "ocamllsp" ''
+    if command -v ocamllsp >/dev/null 2>&1; then
+      exec ocamllsp "$@"
+    fi
+    if [ -n "''${OPAM_SWITCH_PREFIX:-}" ] && command -v opam >/dev/null 2>&1; then
+      exec opam exec -- ocamllsp "$@"
+    fi
+    exec ${lib.getExe pkgs.ocamlPackages.ocaml-lsp} "$@"
+  '';
 in {
   config.vim = {
     # ── Editor UI ────────────────────────────────────────────────────────────
@@ -126,7 +137,7 @@ in {
       };
       grammars = with pkgs.vimPlugins.nvim-treesitter.builtGrammars; [
         bash erlang elixir json yaml eex heex lua make markdown
-        markdown_inline nix regex typst vim vimdoc
+        markdown_inline nix ocaml ocaml_interface regex typst vim vimdoc
       ];
     };
 
@@ -154,6 +165,17 @@ in {
         "<leader>tt"  = "Toggle task done/undone";
         "<leader>t"   = " Typst";
         "<leader>tp"  = "Preview PDF";
+        "<leader>o"   = "OCaml";
+        "<leader>ot"  = "Type enclosing";
+        "<leader>oc"  = "Construct (fill hole)";
+        "<leader>on"  = "Next hole";
+        "<leader>oN"  = "Previous hole";
+        "<leader>oj"  = "Jump to target";
+        "<leader>os"  = "Switch .ml/.mli";
+        "<leader>oi"  = "Infer interface";
+        "<leader>od"  = "Search definition by type";
+        "<leader>o]"  = "Next phrase";
+        "<leader>o["  = "Previous phrase";
         "<leader>x"   = " Diagnostics";
         "<leader>l"   = " LSP";
       };
@@ -200,6 +222,8 @@ in {
         };
       };
       inlayHints.enable = true;
+
+      servers.ocaml-lsp.cmd = lib.mkForce [ "${ocamllsp}" ];
     };
 
     # Per-language LSPs that nvf wraps natively.
@@ -224,6 +248,11 @@ in {
         };
       };
 
+      ocaml = {
+        enable = true;
+        lsp.enable = true;
+      };
+
       typst = {
         enable = true;
         lsp.enable = true;
@@ -235,6 +264,14 @@ in {
       # elp is wired up via raw lspconfig in luaConfigPost; nvf doesn't ship
       # a language module that would install it for us.
       pkgs.erlang-language-platform
+
+      # ocaml-lsp shells out to dune to read the merlin config, and throws on
+      # didOpen without it, leaving the document unregistered.
+      pkgs.dune_3
+
+      # ocaml-lsp drives ocamlformat over RPC to pretty-print types in hover
+      # and type-enclosing output; unrelated to format-on-save.
+      pkgs.ocamlPackages.ocamlformat
     ];
 
     # ── Extra plugins not wrapped by nvf ─────────────────────────────────────
@@ -246,6 +283,23 @@ in {
       lsp-lines = {
         package = pkgs.vimPlugins.lsp_lines-nvim;
         setup = "require('lsp_lines').setup()";
+      };
+
+      # A `keymaps` table replaces the plugin's defaults wholesale, which is how its
+      # <leader>p / <leader>t globals are kept from clobbering PARA and Typst.
+      ocaml-nvim = {
+        package = pkgs.vimPlugins.ocaml-nvim;
+        setup = ''
+          require('ocaml').setup({
+            params = { client = 'ocaml-lsp' },
+            keymaps = {
+              type_enclosing_grow     = '<Up>',
+              type_enclosing_shrink   = '<Down>',
+              type_enclosing_increase = '<Right>',
+              type_enclosing_decrease = '<Left>',
+            },
+          })
+        '';
       };
 
       gmn = {

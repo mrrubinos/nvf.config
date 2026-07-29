@@ -73,6 +73,18 @@
     { mode = [ "v" "n" ];  key = "<leader>cg"; action = "<cmd>CodeCompanionToggle gemini<cr>";    desc = "Toggle to Gemini Adapter (CodeCompanion)"; }
     { mode = [ "v" "n" ];  key = "<leader>ca"; action = "<cmd>CodeCompanionToggle anthropic<cr>"; desc = "Toggle to Anthropic Adapter (CodeCompanion)"; }
 
+    # ── OCaml (ocaml.nvim, merlin-backed) ────────────────────────────────────
+    { mode = "n"; key = "<leader>ot"; action = "<cmd>OCamlTypeEnclosing<CR>";  silent = true; desc = "Type enclosing"; }
+    { mode = "n"; key = "<leader>oc"; action = "<cmd>OCamlConstruct<CR>";      silent = true; desc = "Construct (fill hole)"; }
+    { mode = "n"; key = "<leader>on"; action = "<cmd>OCamlJumpNextHole<CR>";   silent = true; desc = "Next hole"; }
+    { mode = "n"; key = "<leader>oN"; action = "<cmd>OCamlJumpPrevHole<CR>";   silent = true; desc = "Previous hole"; }
+    { mode = "n"; key = "<leader>oj"; action = "<cmd>OCamlJump<CR>";           silent = true; desc = "Jump to target"; }
+    { mode = "n"; key = "<leader>os"; action = "<cmd>OCamlSwitchIntfImpl<CR>"; silent = true; desc = "Switch .ml/.mli"; }
+    { mode = "n"; key = "<leader>oi"; action = "<cmd>OCamlInferIntf<CR>";      silent = true; desc = "Infer interface"; }
+    { mode = "n"; key = "<leader>o]"; action = "<cmd>OCamlPhraseNext<CR>";     silent = true; desc = "Next phrase"; }
+    { mode = "n"; key = "<leader>o["; action = "<cmd>OCamlPhrasePrev<CR>";     silent = true; desc = "Previous phrase"; }
+    { mode = "n"; key = "<leader>od"; action = ":OCamlSearchDefinition ";                    desc = "Search definition by type"; }
+
     # ── Typst ────────────────────────────────────────────────────────────────
     { mode = "n"; key = "<leader>tp";
       action = "<cmd>lua vim.fn.jobstart('xdg-open ' .. vim.fn.expand('%:p:r') .. '.pdf', {detach = true})<CR>";
