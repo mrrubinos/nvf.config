@@ -1,51 +1,67 @@
--- PARA Method Task & Note Management Plugin
--- Place this in your nixvim configuration or as a separate Lua module
+-- PARA Method note, task and log management.
+--
+-- A project, area or resource is a directory under its category root holding
+-- an optional page (<slug>/<slug>.md), a notes/ directory and its own log.md.
+-- Subdirectories are created the first time something goes in them, so the
+-- layout matches whatever the store actually holds.
 
 local M = {}
 
--- Configuration defaults (will be overridden by setup())
 M.config = {
   base_path = vim.fn.expand("~/Documents/PARA"),
-  log_file = nil, -- Will be set based on base_path
-  log_archive_dir = nil, -- Will be set based on base_path
-  tasks_file = nil, -- Will be set based on base_path
-  tasks_archive_file = nil, -- Will be set based on base_path
+  log_file = nil,
+  log_archive_dir = nil,
+  tasks_file = nil,
+  tasks_archive_file = nil,
   date_format = "%Y-%m-%d",
   time_format = "%H:%M",
   datetime_format = "%Y-%m-%d %H:%M:%S",
+  archive_dir = "4_archive",
+  categories = {
+    project  = { dir = "1_projects",  label = "Project",  plural = "Projects",  order = 1 },
+    area     = { dir = "2_areas",     label = "Area",     plural = "Areas",     order = 2 },
+    resource = { dir = "3_resources", label = "Resource", plural = "Resources", order = 3 },
+  },
   keymaps = {
-    -- Log management
+    menu = "<leader>pp",
+    find_entity = "<leader>pf",
+    new_entity = "<leader>pN",
+    new_note = "<leader>pc",
+    projects = "<leader>pP",
+    areas = "<leader>pA",
+    resources = "<leader>pR",
+    entity_log = "<leader>pe",
+    archive_entity = "<leader>px",
     open_log = "<leader>pl",
     add_log = "<leader>pla",
     archive_log = "<leader>plx",
     insert_log_template = "<leader>pli",
-    -- Task management
     open_tasks = "<leader>pt",
     add_task = "<leader>pta",
     archive_done_tasks = "<leader>ptx",
-    toggle_task = "<leader>tt",
     insert_task_template = "<leader>pti",
-    -- Search and archive
+    toggle_task = "<leader>tt",
     search_by_name = "<leader>pn",
     search_by_content = "<leader>ps",
-    archive_project = "<leader>px",
+    stats = "<leader>pS",
   },
-  templates = {
-    task = "- [ ] %s",
-    task_with_priority = "[%s] - [ ] %s",
-    note_header = "# %s\n\nCreated: %s\nCategory: %s\n\n---\n\n",
-  },
-  -- Priority order for sorting (alphabetically sortable)
   priority_order = {
     A = "Critical",
     B = "High",
     C = "Normal",
     D = "Low",
-    E = "Someday"
-  }
+    E = "Someday",
+  },
 }
 
--- Utilities
+local CATEGORY_ORDER = { "project", "area", "resource" }
+
+-- ── Utilities ───────────────────────────────────────────────────────────────
+
+local function notify(msg, level)
+  vim.notify(msg, level or vim.log.levels.INFO, { title = "PARA" })
+end
+
 local function ensure_directory(path)
   if vim.fn.isdirectory(path) == 0 then
     vim.fn.mkdir(path, "p")
@@ -54,6 +70,7 @@ end
 
 local function ensure_file(path, initial_content)
   if vim.fn.filereadable(path) == 0 then
+    ensure_directory(vim.fn.fnamemodify(path, ":h"))
     local file = io.open(path, "w")
     if file then
       file:write(initial_content or "")
@@ -62,1242 +79,1054 @@ local function ensure_file(path, initial_content)
   end
 end
 
-local function get_current_date()
-  return os.date(M.config.date_format)
+local function read_lines(path)
+  local lines = {}
+  local file = io.open(path, "r")
+  if not file then return lines end
+  for line in file:lines() do
+    table.insert(lines, line)
+  end
+  file:close()
+  return lines
 end
 
-local function get_current_time()
-  return os.date(M.config.time_format)
+local function write_lines(path, lines)
+  ensure_directory(vim.fn.fnamemodify(path, ":h"))
+  local file = io.open(path, "w")
+  if not file then return false end
+  for _, line in ipairs(lines) do
+    file:write(line .. "\n")
+  end
+  file:close()
+  return true
 end
 
-local function get_current_datetime()
-  return os.date(M.config.datetime_format)
+local function append_line(path, line)
+  local file = io.open(path, "a")
+  if not file then return false end
+  file:write(line .. "\n")
+  file:close()
+  return true
 end
 
--- Initialize PARA directory structure
+local function now() return os.date(M.config.datetime_format) end
+local function today() return os.date(M.config.date_format) end
+
+local function slugify(text)
+  local slug = tostring(text):lower():gsub("[^%w]+", "-"):gsub("^%-+", ""):gsub("%-+$", "")
+  return slug
+end
+
+local function titlecase(slug)
+  return (slug:gsub("%-", " "):gsub("(%a)([%w]*)", function(a, b) return a:upper() .. b end))
+end
+
+local function category_of(name)
+  return M.config.categories[name]
+end
+
+-- Reload the buffer holding path when it is already open, otherwise open it.
+local function open_file(path)
+  ensure_directory(vim.fn.fnamemodify(path, ":h"))
+  vim.cmd("edit " .. vim.fn.fnameescape(path))
+end
+
+local function refresh_or_open(path, goto_end)
+  local bufnr = vim.fn.bufnr(path)
+  if bufnr ~= -1 and vim.api.nvim_buf_is_loaded(bufnr) then
+    vim.api.nvim_buf_call(bufnr, function()
+      vim.cmd("edit!")
+      if goto_end then vim.cmd("normal! G") end
+    end)
+  else
+    open_file(path)
+    if goto_end then vim.cmd("normal! G") end
+  end
+end
+
+-- ── Paths ───────────────────────────────────────────────────────────────────
+
+local function category_root(category)
+  return M.config.base_path .. "/" .. category_of(category).dir
+end
+
+local function archive_root()
+  return M.config.base_path .. "/" .. M.config.archive_dir
+end
+
+local function entity_dir(category, slug)
+  return category_root(category) .. "/" .. slug
+end
+
+local function entity_page(category, slug)
+  return entity_dir(category, slug) .. "/" .. slug .. ".md"
+end
+
+local function entity_notes_dir(category, slug)
+  return entity_dir(category, slug) .. "/notes"
+end
+
+local function entity_log(category, slug)
+  return entity_dir(category, slug) .. "/log.md"
+end
+
+local function entity_log_archive(category, slug)
+  return entity_dir(category, slug) .. "/logs/archive"
+end
+
+-- A flat <slug>.md from the old layout becomes <slug>/<slug>.md, so that
+-- notes/ and log.md have somewhere to live.
+local function promote_entity(category, slug)
+  local root = category_root(category)
+  local flat = root .. "/" .. slug .. ".md"
+  local dir = root .. "/" .. slug
+  if vim.fn.filereadable(flat) == 1 and vim.fn.isdirectory(dir) == 0 then
+    ensure_directory(dir)
+    vim.fn.rename(flat, dir .. "/" .. slug .. ".md")
+  end
+  ensure_directory(dir)
+end
+
 function M.init_directories()
   ensure_directory(M.config.base_path)
   ensure_directory(M.config.log_archive_dir)
-  
-  local categories = {"1_projects", "2_areas", "3_resources", "4_archive"}
-  for _, category in ipairs(categories) do
-    ensure_directory(M.config.base_path .. "/" .. category)
+  for _, name in ipairs(CATEGORY_ORDER) do
+    ensure_directory(category_root(name))
   end
-  
-  -- Initialize log file
-  ensure_file(M.config.log_file, "# Log\nCreated: " .. get_current_datetime() .. "\n\n")
-  
-  -- Initialize tasks file with sortable structure
-  ensure_file(M.config.tasks_file, "# Tasks\nCreated: " .. get_current_datetime() .. "\n\n")
+  ensure_directory(archive_root())
+  ensure_file(M.config.log_file, "# Log\nCreated: " .. now() .. "\n\n")
+  ensure_file(M.config.tasks_file, "# Tasks\nCreated: " .. now() .. "\n\n")
 end
 
--- Open log file
-function M.open_log()
-  ensure_file(M.config.log_file, "# Log\nCreated: " .. get_current_datetime() .. "\n\n")
-  vim.cmd("edit " .. M.config.log_file)
-  -- Move to end of file
-  vim.cmd("normal G")
-end
+-- ── Listing ─────────────────────────────────────────────────────────────────
 
--- Add log entry
-function M.add_log_entry()
-  vim.ui.input({
-    prompt = "Log entry: ",
-  }, function(input)
-    if input and input ~= "" then
-      local timestamp = get_current_datetime()
-      local entry = string.format("%s - %s\n", timestamp, input)
-      
-      -- Append to log file
-      local file = io.open(M.config.log_file, "a")
-      if file then
-        file:write(entry)
-        file:close()
-        
-        -- Check if log file is open in any buffer
-        local log_bufnr = vim.fn.bufnr(M.config.log_file)
-        
-        if log_bufnr ~= -1 then
-          -- Buffer exists, reload it
-          vim.api.nvim_buf_call(log_bufnr, function()
-            vim.cmd("edit!")
-            vim.cmd("normal G")  -- Go to end of file
-          end)
-        else
-          -- File not open, open it
-          vim.cmd("edit " .. M.config.log_file)
-          vim.cmd("normal G")  -- Go to end of file
-        end
-        
-        vim.notify("Log entry added", vim.log.levels.INFO)
-      end
-    end
-  end)
-end
-
--- Archive log entries before a given date
-function M.archive_log()
-  vim.ui.input({
-    prompt = "Archive entries before date (YYYY-MM-DD): ",
-    default = get_current_date(),
-  }, function(cutoff_date)
-    if not cutoff_date or cutoff_date == "" then return end
-    
-    -- Read log file
-    local log_content = {}
-    local archive_content = {}
-    local file = io.open(M.config.log_file, "r")
-    if not file then
-      vim.notify("Log file not found", vim.log.levels.ERROR)
-      return
-    end
-    
-    for line in file:lines() do
-      -- Check if line starts with a timestamp
-      local date_match = line:match("^(%d%d%d%d%-%d%d%-%d%d)")
-      if date_match and date_match < cutoff_date then
-        table.insert(archive_content, line)
-      else
-        table.insert(log_content, line)
-      end
-    end
-    file:close()
-    
-    if #archive_content == 0 then
-      vim.notify("No entries to archive", vim.log.levels.INFO)
-      return
-    end
-    
-    -- Write archive file
-    local archive_file = string.format("%s/log_archive_%s.md", M.config.log_archive_dir, os.date("%Y%m%d_%H%M%S"))
-    ensure_directory(M.config.log_archive_dir)
-    file = io.open(archive_file, "w")
-    if file then
-      file:write("# Archived Log Entries\n")
-      file:write("Archived: " .. get_current_datetime() .. "\n")
-      file:write("Entries before: " .. cutoff_date .. "\n\n")
-      file:write(table.concat(archive_content, "\n"))
-      file:close()
-    end
-    
-    -- Update log file
-    file = io.open(M.config.log_file, "w")
-    if file then
-      if #log_content > 0 then
-        file:write(table.concat(log_content, "\n"))
-      else
-        file:write("# Log\nCreated: " .. get_current_datetime() .. "\n\n")
-      end
-      file:close()
-    end
-    
-    vim.notify(string.format("Archived %d entries to %s", #archive_content, archive_file), vim.log.levels.INFO)
-  end)
-end
-
--- Open tasks file
-function M.open_tasks()
-  ensure_file(M.config.tasks_file, "# Tasks\nCreated: " .. get_current_datetime() .. "\n\n")
-  vim.cmd("edit " .. M.config.tasks_file)
-end
-
--- Add new task with priority
-function M.add_task()
-  vim.ui.input({
-    prompt = "Task description: ",
-  }, function(description)
-    if not description or description == "" then return end
-    
-    -- Get priority keys sorted alphabetically
-    local priority_keys = {}
-    for k, _ in pairs(M.config.priority_order) do
-      table.insert(priority_keys, k)
-    end
-    table.sort(priority_keys)
-    
-    -- Create display options
-    local options = {}
-    for _, k in ipairs(priority_keys) do
-      table.insert(options, k .. " - " .. M.config.priority_order[k])
-    end
-    
-    vim.ui.select(
-      options,
-      { prompt = "Priority: " },
-      function(choice)
-        if not choice then return end
-        local priority = choice:sub(1, 1) -- Get first character (A, B, C, etc.)
-        
-        local task_line
-        if priority == "C" then -- Normal priority, no prefix
-          task_line = "- [ ] " .. description
-        else
-          task_line = string.format("[%s] - [ ] %s", priority, description)
-        end
-        
-        -- Add to tasks file
-        M.add_task_to_file(task_line)
-      end
-    )
-  end)
-end
-
--- Sort tasks in file by priority
-local function sort_tasks_in_file()
-  local file = io.open(M.config.tasks_file, "r")
-  if not file then return end
-  
-  local header_lines = {}
-  local tasks = {}
-  local in_header = true
-  
-  -- Read and categorize lines
-  for line in file:lines() do
-    if in_header and (line:match("^%[%w%] %- %[[ x]%]") or line:match("^%- %[[ x]%]")) then
-      in_header = false
-    end
-    
-    if in_header then
-      table.insert(header_lines, line)
-    else
-      if line:match("^%[%w%] %- %[[ x]%]") or line:match("^%- %[[ x]%]") then
-        table.insert(tasks, line)
-      elseif line ~= "" then
-        table.insert(tasks, line)
-      end
+--- Slugs of every entity in a category, directories and legacy flat files.
+function M.entities(category)
+  local root = category_root(category)
+  local seen, out = {}, {}
+  for _, dir in ipairs(vim.fn.glob(root .. "/*/", false, true)) do
+    local slug = vim.fn.fnamemodify(dir:sub(1, -2), ":t")
+    if not seen[slug] then
+      seen[slug] = true
+      table.insert(out, slug)
     end
   end
-  file:close()
-  
-  -- Sort tasks alphabetically (which sorts by priority prefix)
-  table.sort(tasks)
-  
-  -- Write back
-  file = io.open(M.config.tasks_file, "w")
-  if file then
-    for _, line in ipairs(header_lines) do
-      file:write(line .. "\n")
+  for _, file in ipairs(vim.fn.glob(root .. "/*.md", false, true)) do
+    local slug = vim.fn.fnamemodify(file, ":t:r")
+    if not seen[slug] then
+      seen[slug] = true
+      table.insert(out, slug)
     end
-    for _, task in ipairs(tasks) do
-      file:write(task .. "\n")
-    end
-    file:close()
   end
+  table.sort(out)
+  return out
 end
 
--- Add task to tasks file (sorted)
-function M.add_task_to_file(task_line)
-  ensure_file(M.config.tasks_file, "# Tasks\nCreated: " .. get_current_datetime() .. "\n\n")
-  
-  -- Append task
-  local file = io.open(M.config.tasks_file, "a")
-  if file then
-    file:write(task_line .. "\n")
-    file:close()
+function M.notes_of(category, slug)
+  local dir = entity_notes_dir(category, slug)
+  local out = {}
+  for _, file in ipairs(vim.fn.glob(dir .. "/*.md", false, true)) do
+    table.insert(out, { name = vim.fn.fnamemodify(file, ":t:r"), path = file })
   end
-  
-  -- Sort the file
-  sort_tasks_in_file()
-  
-  -- Check if tasks file is open in any buffer
-  local tasks_bufnr = vim.fn.bufnr(M.config.tasks_file)
-  
-  if tasks_bufnr ~= -1 then
-    -- Buffer exists, reload it
-    vim.api.nvim_buf_call(tasks_bufnr, function()
-      vim.cmd("edit!")
-    end)
-  else
-    -- File not open, open it
-    vim.cmd("edit " .. M.config.tasks_file)
-  end
-  
-  vim.notify("Task added to tasks.md", vim.log.levels.INFO)
+  table.sort(out, function(a, b) return a.name < b.name end)
+  return out
 end
 
--- Archive completed tasks
-function M.archive_done_tasks()
-  local file = io.open(M.config.tasks_file, "r")
-  if not file then
-    vim.notify("Tasks file not found", vim.log.levels.ERROR)
+local function count_notes(category, slug)
+  return #M.notes_of(category, slug)
+end
+
+local function count_log_entries(category, slug)
+  local path = entity_log(category, slug)
+  if vim.fn.filereadable(path) == 0 then return 0 end
+  local n = 0
+  for _, line in ipairs(read_lines(path)) do
+    if line:match("^%d%d%d%d%-%d%d%-%d%d") then n = n + 1 end
+  end
+  return n
+end
+
+local function page_field(category, slug, field)
+  local path = entity_page(category, slug)
+  if vim.fn.filereadable(path) == 0 then return nil end
+  for _, line in ipairs(read_lines(path)) do
+    local value = line:match("^" .. field .. ":%s*(.+)$")
+    if value then return value end
+  end
+  return nil
+end
+
+local function plural(word, n)
+  if n == 1 then return word end
+  if word == "entry" then return "entries" end
+  return word .. "s"
+end
+
+local function entity_summary(category, slug)
+  local notes = count_notes(category, slug)
+  local logs = count_log_entries(category, slug)
+  local parts = {}
+  local status = page_field(category, slug, "Status")
+  if status then table.insert(parts, status) end
+  table.insert(parts, notes .. " " .. plural("note", notes))
+  table.insert(parts, logs .. " log " .. plural("entry", logs))
+  if vim.fn.filereadable(entity_page(category, slug)) == 0 then
+    table.insert(parts, "no page")
+  end
+  return table.concat(parts, " | ")
+end
+
+-- ── Pickers ─────────────────────────────────────────────────────────────────
+
+--- Choose one of entries ({ display, value }) and pass its value to on_choice.
+local function pick(title, entries, on_choice)
+  if #entries == 0 then
+    notify("Nothing to choose from", vim.log.levels.WARN)
     return
   end
-  
-  local active_tasks = {}
-  local done_tasks = {}
-  
-  for line in file:lines() do
-    if line:match("%[x%]") then
-      table.insert(done_tasks, line)
-    else
-      table.insert(active_tasks, line)
-    end
-  end
-  file:close()
-  
-  if #done_tasks == 0 then
-    vim.notify("No completed tasks to archive", vim.log.levels.INFO)
-    return
-  end
-  
-  -- Append to archive file
-  ensure_file(M.config.tasks_archive_file, "# Archived Tasks\n\n")
-  file = io.open(M.config.tasks_archive_file, "a")
-  if file then
-    file:write("\n## Archived on " .. get_current_datetime() .. "\n")
-    for _, task in ipairs(done_tasks) do
-      file:write(task .. "\n")
-    end
-    file:close()
-  end
-  
-  -- Write back active tasks
-  file = io.open(M.config.tasks_file, "w")
-  if file then
-    for _, line in ipairs(active_tasks) do
-      file:write(line .. "\n")
-    end
-    file:close()
-  end
-  
-  vim.notify(string.format("Archived %d completed tasks", #done_tasks), vim.log.levels.INFO)
-end
 
--- Task summary (removed, tasks are now in a single sortable file)
-function M.show_task_summary_deprecated()
-  M.init_tasks_file()
-  
-  local tasks = M.parse_tasks_file()
-  local summary_lines = {
-    "# Task Summary - " .. os.date("%Y-%m-%d"),
-    "",
-    "## Statistics",
-    string.format("- Total pending: %d", tasks.stats.pending),
-    string.format("- High priority: %d", tasks.stats.high_priority),
-    string.format("- Completed today: %d", tasks.stats.completed_today),
-    "",
-    "## Pending Tasks by Priority",
-    ""
-  }
-  
-  -- Group by priority
-  local priorities = {"high", "1", "2", "3", "low", "normal"}
-  for _, priority in ipairs(priorities) do
-    local priority_tasks = tasks.by_priority[priority] or {}
-    if #priority_tasks > 0 then
-      table.insert(summary_lines, "### " .. (priority == "normal" and "Normal Priority" or priority:upper()))
-      for _, task in ipairs(priority_tasks) do
-        table.insert(summary_lines, task.line)
-      end
-      table.insert(summary_lines, "")
-    end
-  end
-  
-  -- Create temporary buffer for summary
-  local buf = vim.api.nvim_create_buf(false, true)
-  vim.api.nvim_buf_set_lines(buf, 0, -1, false, summary_lines)
-  vim.api.nvim_buf_set_option(buf, 'filetype', 'markdown')
-  vim.api.nvim_buf_set_option(buf, 'buftype', 'nofile')
-  vim.api.nvim_buf_set_name(buf, 'Task Summary')
-  
-  -- Open in split
-  vim.cmd('split')
-  vim.api.nvim_win_set_buf(0, buf)
-end
+  local ok_pickers, pickers = pcall(require, "telescope.pickers")
+  local ok_finders, finders = pcall(require, "telescope.finders")
+  local ok_conf, telescope_conf = pcall(require, "telescope.config")
+  local ok_actions, actions = pcall(require, "telescope.actions")
+  local ok_state, action_state = pcall(require, "telescope.actions.state")
 
--- Parse tasks file and return structured data (deprecated)
-function M.parse_tasks_file_deprecated()
-  local tasks = {
-    pending = {},
-    completed = {},
-    by_priority = {},
-    stats = {
-      pending = 0,
-      completed = 0,
-      high_priority = 0,
-      completed_today = 0
-    }
-  }
-  
-  if vim.fn.filereadable(M.config.tasks_file) == 0 then
-    return tasks
-  end
-  
-  local file = io.open(M.config.tasks_file, "r")
-  if not file then return tasks end
-  
-  local today = os.date("%Y-%m-%d")
-  
-  for line in file:lines() do
-    if line:match("^%s*%- %[[ ]%]") then
-      -- Pending task
-      local priority = line:match("%(([^)]+)%)")
-      priority = priority or "normal"
-      
-      local task = {
-        line = line,
-        priority = priority,
-        text = line:gsub("^%s*%- %[ %] ?(%([^)]+%))?%s*", ""),
-        project = line:match("%(project: ([^)]+)%)"),
-        area = line:match("%(area: ([^)]+)%)")
-      }
-      
-      table.insert(tasks.pending, task)
-      
-      if not tasks.by_priority[priority] then
-        tasks.by_priority[priority] = {}
-      end
-      table.insert(tasks.by_priority[priority], task)
-      
-      tasks.stats.pending = tasks.stats.pending + 1
-      
-      if priority == "high" or priority == "1" then
-        tasks.stats.high_priority = tasks.stats.high_priority + 1
-      end
-    elseif line:match("^%s*%- %[x%]") then
-      -- Completed task
-      table.insert(tasks.completed, line)
-      tasks.stats.completed = tasks.stats.completed + 1
-      
-      -- Check if completed today (simple heuristic - could be improved)
-      if line:match(today) then
-        tasks.stats.completed_today = tasks.stats.completed_today + 1
-      end
-    end
-  end
-  
-  file:close()
-  return tasks
-end
-
--- Insert log entry template at current position
-function M.insert_log_template()
-  local timestamp = get_current_datetime()
-  local template = string.format("%s - ", timestamp)
-  
-  -- Insert at current cursor position
-  local row, col = unpack(vim.api.nvim_win_get_cursor(0))
-  local line = vim.api.nvim_get_current_line()
-  local new_line = line:sub(1, col) .. template .. line:sub(col + 1)
-  vim.api.nvim_set_current_line(new_line)
-  
-  -- Move cursor to end of template
-  vim.api.nvim_win_set_cursor(0, {row, col + #template})
-  
-  -- Enter insert mode
-  vim.cmd("startinsert!")
-end
-
--- Insert task template at current position
-function M.insert_task_template()
-  -- Ask for priority
-  local priority_keys = {}
-  for k, _ in pairs(M.config.priority_order) do
-    table.insert(priority_keys, k)
-  end
-  table.sort(priority_keys)
-  
-  local options = {}
-  for _, k in ipairs(priority_keys) do
-    table.insert(options, k .. " - " .. M.config.priority_order[k])
-  end
-  
-  vim.ui.select(
-    options,
-    { prompt = "Priority: " },
-    function(choice)
-      if not choice then return end
-      local priority = choice:sub(1, 1)
-      
-      local template
-      if priority == "C" then -- Normal priority, no prefix
-        template = "- [ ] "
-      else
-        template = string.format("[%s] - [ ] ", priority)
-      end
-      
-      -- Insert at current cursor position
-      local row, col = unpack(vim.api.nvim_win_get_cursor(0))
-      local line = vim.api.nvim_get_current_line()
-      local new_line = line:sub(1, col) .. template .. line:sub(col + 1)
-      vim.api.nvim_set_current_line(new_line)
-      
-      -- Move cursor to end of template
-      vim.api.nvim_win_set_cursor(0, {row, col + #template})
-      
-      -- Enter insert mode
-      vim.cmd("startinsert!")
-    end
-  )
-end
-
--- Toggle task completion in current line
-function M.toggle_task()
-  local line = vim.api.nvim_get_current_line()
-  local new_line
-  
-  -- Handle priority-prefixed tasks
-  if line:match("%[%w%] %- %[ %]") then
-    new_line = line:gsub("%- %[ %]", "- [x]")
-  elseif line:match("%[%w%] %- %[x%]") then
-    new_line = line:gsub("%- %[x%]", "- [ ]")
-  -- Handle regular tasks
-  elseif line:match("%- %[ %]") then
-    new_line = line:gsub("%- %[ %]", "- [x]")
-  elseif line:match("%- %[x%]") then
-    new_line = line:gsub("%- %[x%]", "- [ ]")
-  else
-    return
-  end
-  
-  vim.api.nvim_set_current_line(new_line)
-  
-  -- If in tasks file, re-sort
-  if vim.fn.expand("%:t") == "tasks.md" then
-    sort_tasks_in_file()
-    vim.notify("Task toggled", vim.log.levels.INFO)
-  end
-end
-
--- Note creation
-function M.create_note()
-  vim.ui.select(
-    {"Projects", "Areas", "Resources"},
-    { prompt = "Note category: " },
-    function(category)
-      if not category then return end
-      
-      vim.ui.input({
-        prompt = "Note title: ",
-      }, function(title)
-        if not title or title == "" then return end
-        
-        local filename = title:lower():gsub("%s+", "-") .. ".md"
-        local category_num = ({Projects = "1", Areas = "2", Resources = "3"})[category]
-        local filepath = string.format("%s/%s_%s/%s", 
-          M.config.base_path, 
-          category_num, 
-          category:lower(),
-          filename
-        )
-        
-        -- Create note with header
-        local header = string.format(
-          M.config.templates.note_header,
-          title,
-          os.date("%Y-%m-%d %H:%M"),
-          category
-        )
-        
-        local file = io.open(filepath, "w")
-        if file then
-          file:write(header)
-          file:close()
-        end
-        
-        vim.cmd("edit " .. filepath)
-      end)
-    end
-  )
-end
-
--- Navigate to or create a specific area (removed - not in requirements)
-function M.goto_area_deprecated()
-  local areas = M.get_areas()
-  local area_names = {"[Create New Area]"}
-  
-  -- Add existing areas to the list
-  for _, area in ipairs(areas) do
-    table.insert(area_names, area.display_name)
-  end
-  
-  vim.ui.select(area_names, {
-    prompt = "Select area (or create new):",
-  }, function(choice, idx)
-    if not choice then return end
-    
-    if idx == 1 then
-      -- Create new area
-      vim.ui.input({
-        prompt = "New area name: ",
-      }, function(name)
-        if name and name ~= "" then
-          local filename = name:lower():gsub("%s+", "-") .. ".md"
-          local filepath = M.config.base_path .. "/2_areas/" .. filename
-          
-          -- Create area file with template
-          local content = string.format([[
-# Area: %s
-
-Created: %s
-
-## Overview
-
-
-## Responsibilities
-
-
-## Standards & Maintenance
-
-
-## Regular Tasks
-- [ ] 
-
-## Resources
-
-
-## Notes
-
-]], name, os.date("%Y-%m-%d %H:%M"))
-          
-          local file = io.open(filepath, "w")
-          if file then
-            file:write(content)
-            file:close()
-            vim.cmd("edit " .. filepath)
-            vim.notify("Area created: " .. name, vim.log.levels.INFO)
-          end
-        end
-      end)
-    else
-      -- Open existing area
-      local area = areas[idx - 1]
-      if area.is_directory then
-        vim.cmd("Explore " .. area.path)
-      else
-        vim.cmd("edit " .. area.path)
-      end
-    end
-  end)
-end
-
--- Navigate to or create a specific project (removed - not in requirements)
-function M.goto_project_deprecated()
-  local projects = M.get_projects()
-  local project_names = {"[Create New Project]"}
-  
-  -- Add existing projects to the list
-  for _, project in ipairs(projects) do
-    table.insert(project_names, project.display_name)
-  end
-  
-  vim.ui.select(project_names, {
-    prompt = "Select project (or create new):",
-  }, function(choice, idx)
-    if not choice then return end
-    
-    if idx == 1 then
-      -- Create new project
-      vim.ui.input({
-        prompt = "New project name: ",
-      }, function(name)
-        if name and name ~= "" then
-          local filename = name:lower():gsub("%s+", "-") .. ".md"
-          local filepath = M.config.base_path .. "/1_projects/" .. filename
-          
-          -- Create project file with template
-          local content = string.format([[
-# Project: %s
-
-Created: %s
-Status: Active
-Due Date: 
-Priority: Normal
-
-## Objective
-
-
-## Success Criteria
-
-
-## Tasks
-- [ ] 
-
-## Resources
-
-
-## Notes
-
-
-## Retrospective
-
-]], name, os.date("%Y-%m-%d %H:%M"))
-          
-          local file = io.open(filepath, "w")
-          if file then
-            file:write(content)
-            file:close()
-            vim.cmd("edit " .. filepath)
-            vim.notify("Project created: " .. name, vim.log.levels.INFO)
-          end
-        end
-      end)
-    else
-      -- Open existing project
-      local project = projects[idx - 1]
-      if project.is_directory then
-        vim.cmd("Explore " .. project.path)
-      else
-        vim.cmd("edit " .. project.path)
-      end
-    end
-  end)
-end
-
--- Search notes by name
-function M.search_notes_by_name()
-  vim.ui.input({
-    prompt = "Search note names for: ",
-  }, function(query)
-    if query and query ~= "" then
-      if pcall(require, "telescope") then
-        require("telescope.builtin").find_files({
-          cwd = M.config.base_path,
-          prompt_title = "Search Notes by Name",
-          search_file = query,
-        })
-      else
-        -- Fallback: use vim's built-in file search
-        vim.cmd(string.format("find %s -name '*%s*' -type f | copen", M.config.base_path, query))
-      end
-    end
-  end)
-end
-
--- Search notes by content
-function M.search_notes_by_content()
-  vim.ui.input({
-    prompt = "Search note contents for: ",
-  }, function(query)
-    if query and query ~= "" then
-      if pcall(require, "telescope") then
-        require("telescope.builtin").grep_string({
-          search = query,
-          cwd = M.config.base_path,
-          prompt_title = "Search Notes by Content",
-        })
-      else
-        vim.cmd(string.format("vimgrep /%s/j %s/**/*.md | copen", query, M.config.base_path))
-      end
-    end
-  end)
-end
-
--- Archive a project (move from Projects to Archive)
-function M.archive_project()
-  local projects = M.get_projects()
-  if #projects == 0 then
-    vim.notify("No projects found to archive", vim.log.levels.WARN)
-    return
-  end
-  
-  local project_names = {}
-  for _, project in ipairs(projects) do
-    table.insert(project_names, project.display_name)
-  end
-  
-  vim.ui.select(project_names, {
-    prompt = "Select project to archive: ",
-  }, function(choice, idx)
-    if not choice or not idx then return end
-    
-    local project = projects[idx]
-    local archive_path = M.config.base_path .. "/4_archive/" .. vim.fn.fnamemodify(project.path, ":t")
-    
-    -- Check if file already exists in archive
-    if vim.fn.filereadable(archive_path) == 1 then
-      vim.ui.select({"Yes", "No"}, {
-        prompt = "File already exists in archive. Overwrite?",
-      }, function(confirm)
-        if confirm == "Yes" then
-          vim.fn.rename(project.path, archive_path)
-          vim.notify("Project archived: " .. project.display_name, vim.log.levels.INFO)
-        end
-      end)
-    else
-      vim.fn.rename(project.path, archive_path)
-      vim.notify("Project archived: " .. project.display_name, vim.log.levels.INFO)
-    end
-  end)
-end
-
-
--- Recent files (removed - duplication)
-function M.recent_files_deprecated()
-  -- Use telescope if available for better UI
-  if pcall(require, "telescope") then
-    local pickers = require("telescope.pickers")
-    local finders = require("telescope.finders")
-    local conf = require("telescope.config").values
-    local actions = require("telescope.actions")
-    local action_state = require("telescope.actions.state")
-    
-    -- Get recent files using find command
-    local handle = io.popen(string.format(
-      "find %s -name '*.md' -type f -printf '%%T@ %%p\\n' 2>/dev/null | sort -rn | head -20 | cut -d' ' -f2-",
-      M.config.base_path
-    ))
-    
-    if not handle then
-      vim.notify("Failed to get recent files", vim.log.levels.ERROR)
-      return
-    end
-    
-    local files = {}
-    for file in handle:lines() do
-      -- Get relative path and modification time
-      local relative = file:gsub(M.config.base_path .. "/", "")
-      local stat = vim.loop.fs_stat(file)
-      local modified = stat and os.date("%Y-%m-%d %H:%M", stat.mtime.sec) or ""
-      table.insert(files, {
-        path = file,
-        display = string.format("%-50s %s", relative, modified)
-      })
-    end
-    handle:close()
-    
+  if ok_pickers and ok_finders and ok_conf and ok_actions and ok_state then
     pickers.new({}, {
-      prompt_title = "Recent PARA Files",
-      finder = finders.new_table {
-        results = files,
+      prompt_title = title,
+      finder = finders.new_table({
+        results = entries,
         entry_maker = function(entry)
-          return {
-            value = entry.path,
-            display = entry.display,
-            ordinal = entry.display,
-          }
+          return { value = entry.value, display = entry.display, ordinal = entry.display }
         end,
-      },
-      sorter = conf.generic_sorter({}),
-      attach_mappings = function(prompt_bufnr, map)
+      }),
+      sorter = telescope_conf.values.generic_sorter({}),
+      attach_mappings = function(bufnr)
         actions.select_default:replace(function()
-          actions.close(prompt_bufnr)
           local selection = action_state.get_selected_entry()
-          vim.cmd("edit " .. selection.value)
+          actions.close(bufnr)
+          if selection then on_choice(selection.value) end
         end)
         return true
       end,
     }):find()
-  else
-    -- Fallback without telescope
-    local handle = io.popen(string.format(
-      "find %s -name '*.md' -type f -printf '%%T@ %%p\\n' 2>/dev/null | sort -rn | head -10 | cut -d' ' -f2-",
-      M.config.base_path
-    ))
-    
-    if not handle then
-      vim.notify("Failed to get recent files", vim.log.levels.ERROR)
-      return
-    end
-    
-    local files = {}
-    for file in handle:lines() do
-      local relative = file:gsub(M.config.base_path .. "/", "")
-      table.insert(files, relative)
-    end
-    handle:close()
-    
-    vim.ui.select(files, {
-      prompt = "Recent files:",
-    }, function(choice)
-      if choice then
-        vim.cmd("edit " .. M.config.base_path .. "/" .. choice)
-      end
-    end)
-  end
-end
-
--- Quick switcher (removed - duplication)
-function M.quick_switch_deprecated()
-  if pcall(require, "telescope") then
-    require("telescope.builtin").find_files({
-      cwd = M.config.base_path,
-      prompt_title = "PARA Quick Switch",
-      find_command = {"find", ".", "-name", "*.md", "-type", "f"},
-    })
-  else
-    -- Fallback: use vim.ui.select with all files
-    local handle = io.popen(string.format(
-      "find %s -name '*.md' -type f | head -30",
-      M.config.base_path
-    ))
-    
-    if not handle then
-      vim.notify("Failed to list files", vim.log.levels.ERROR)
-      return
-    end
-    
-    local files = {}
-    for file in handle:lines() do
-      local relative = file:gsub(M.config.base_path .. "/", "")
-      table.insert(files, relative)
-    end
-    handle:close()
-    
-    vim.ui.select(files, {
-      prompt = "Switch to file:",
-    }, function(choice)
-      if choice then
-        vim.cmd("edit " .. M.config.base_path .. "/" .. choice)
-      end
-    end)
-  end
-end
-
--- Task migration (removed - using single log file now)
-function M.migrate_tasks_deprecated()
-  local yesterday = os.date(M.config.date_format, os.time() - 86400)
-  local yesterday_log = string.format("%s/%s.md", M.config.log_path, yesterday)
-  local today_log = get_daily_log_path()
-  
-  if vim.fn.filereadable(yesterday_log) == 0 then
-    vim.notify("No log found for yesterday", vim.log.levels.WARN)
     return
   end
-  
-  -- Read yesterday's tasks
-  local yesterday_tasks = {}
-  local file = io.open(yesterday_log, "r")
-  if file then
-    local in_tasks = false
-    for line in file:lines() do
-      if line:match("^## Tasks") then
-        in_tasks = true
-      elseif line:match("^##%s") then
-        in_tasks = false
-      elseif in_tasks and line:match("^%- %[ %]") then
-        table.insert(yesterday_tasks, line)
-      end
-    end
-    file:close()
-  end
-  
-  if #yesterday_tasks == 0 then
-    vim.notify("No pending tasks from yesterday", vim.log.levels.INFO)
-    return
-  end
-  
-  -- Show tasks and ask which to migrate
-  vim.ui.select(
-    yesterday_tasks,
-    { prompt = "Select tasks to migrate (ESC to migrate all):" },
-    function(choice)
-      local tasks_to_migrate = choice and {choice} or yesterday_tasks
-      
-      -- Ensure today's log exists
-      if vim.fn.filereadable(today_log) == 0 then
-        M.open_daily_log()
-        vim.cmd("bdelete")
-      end
-      
-      -- Add tasks to today's log
-      for _, task in ipairs(tasks_to_migrate) do
-        M.append_to_section(today_log, "## Tasks", task)
-      end
-      
-      vim.notify(string.format("Migrated %d task(s) to today", #tasks_to_migrate), vim.log.levels.INFO)
-    end
-  )
-end
 
--- Get dynamic list of areas from filesystem
-function M.get_areas()
-  local areas_dir = M.config.base_path .. "/2_areas"
-  local areas = {}
-  
-  -- Get all .md files in areas directory
-  local area_files = vim.fn.glob(areas_dir .. "/*.md", false, true)
-  for _, file in ipairs(area_files) do
-    local name = vim.fn.fnamemodify(file, ":t:r")
-    -- Capitalize first letter and replace dashes with spaces
-    local display_name = name:gsub("-", " "):gsub("^%l", string.upper)
-    table.insert(areas, {
-      name = name,
-      display_name = display_name,
-      path = file
-    })
+  local displays = {}
+  for _, entry in ipairs(entries) do
+    table.insert(displays, entry.display)
   end
-  
-  -- Also check for subdirectories as areas
-  local subdirs = vim.fn.glob(areas_dir .. "/*/", false, true)
-  for _, dir in ipairs(subdirs) do
-    local name = vim.fn.fnamemodify(dir:sub(1, -2), ":t")
-    local display_name = name:gsub("-", " "):gsub("^%l", string.upper)
-    table.insert(areas, {
-      name = name,
-      display_name = display_name,
-      path = dir,
-      is_directory = true
-    })
-  end
-  
-  return areas
-end
-
--- Get dynamic list of projects from filesystem
-function M.get_projects()
-  local projects_dir = M.config.base_path .. "/1_projects"
-  local projects = {}
-  
-  -- Get all .md files in projects directory
-  local project_files = vim.fn.glob(projects_dir .. "/*.md", false, true)
-  for _, file in ipairs(project_files) do
-    local name = vim.fn.fnamemodify(file, ":t:r")
-    -- Capitalize first letter and replace dashes with spaces
-    local display_name = name:gsub("-", " "):gsub("^%l", string.upper)
-    table.insert(projects, {
-      name = name,
-      display_name = display_name,
-      path = file
-    })
-  end
-  
-  -- Also check for subdirectories as projects
-  local subdirs = vim.fn.glob(projects_dir .. "/*/", false, true)
-  for _, dir in ipairs(subdirs) do
-    local name = vim.fn.fnamemodify(dir:sub(1, -2), ":t")
-    local display_name = name:gsub("-", " "):gsub("^%l", string.upper)
-    table.insert(projects, {
-      name = name,
-      display_name = display_name,
-      path = dir,
-      is_directory = true
-    })
-  end
-  
-  return projects
-end
-
--- Weekly review (removed - duplication)
-function M.weekly_review_deprecated()
-  local review_items = {}
-  
-  -- Check projects for activity
-  local projects_dir = M.config.base_path .. "/1_projects"
-  local project_files = vim.fn.glob(projects_dir .. "/*.md", false, true)
-  
-  for _, file in ipairs(project_files) do
-    local stat = vim.loop.fs_stat(file)
-    if stat then
-      local days_old = (os.time() - stat.mtime.sec) / 86400
-      if days_old > 7 then
-        local name = vim.fn.fnamemodify(file, ":t:r")
-        table.insert(review_items, string.format("[Project] %s - inactive for %d days", name, math.floor(days_old)))
-      end
-    end
-  end
-  
-  -- Count tasks
-  local total_tasks = 0
-  local completed_tasks = 0
-  local high_priority = 0
-  
-  -- Scan all files for tasks
-  local all_files = vim.fn.glob(M.config.base_path .. "/**/*.md", false, true)
-  for _, file in ipairs(all_files) do
-    local content = io.open(file, "r")
-    if content then
-      for line in content:lines() do
-        if line:match("^%- %[ %]") then
-          total_tasks = total_tasks + 1
-          if line:match("%[High%]") then
-            high_priority = high_priority + 1
-          end
-        elseif line:match("^%- %[x%]") then
-          completed_tasks = completed_tasks + 1
-        end
-      end
-      content:close()
-    end
-  end
-  
-  -- Get dynamic areas for review checklist
-  local areas = M.get_areas()
-  local area_checklist = {}
-  for _, area in ipairs(areas) do
-    table.insert(area_checklist, string.format("- [ ] %s", area.display_name))
-  end
-  local areas_section = #area_checklist > 0 and table.concat(area_checklist, "\n") or "- [ ] No areas found"
-  
-  -- Create review report
-  local review_date = os.date("%Y-%m-%d")
-  local review_file = string.format("%s/weekly-review-%s.md", M.config.log_path, review_date)
-  
-  local report = string.format([[
-# Weekly Review - %s
-
-## Statistics
-- Total pending tasks: %d
-- Completed tasks: %d  
-- High priority tasks: %d
-- Completion rate: %.1f%%
-
-## Projects Status
-%s
-
-## Areas to Review
-%s
-
-## Action Items
-- [ ] Archive completed projects
-- [ ] Review and update project priorities
-- [ ] Clean up resources folder
-- [ ] Plan next week's focus areas
-
-## Notes
-
-]], 
-    review_date,
-    total_tasks,
-    completed_tasks,
-    high_priority,
-    completed_tasks > 0 and (completed_tasks / (completed_tasks + total_tasks) * 100) or 0,
-    #review_items > 0 and table.concat(review_items, "\n") or "All projects active",
-    areas_section
-  )
-  
-  -- Write review file
-  local file = io.open(review_file, "w")
-  if file then
-    file:write(report)
-    file:close()
-  end
-  
-  -- Open the review
-  vim.cmd("edit " .. review_file)
-  vim.notify("Weekly review created", vim.log.levels.INFO)
-end
-
--- Helper function to append to a specific section
-function M.append_to_section(filepath, section_header, content)
-  local lines = {}
-  local file = io.open(filepath, "r")
-  
-  if file then
-    for line in file:lines() do
-      table.insert(lines, line)
-    end
-    file:close()
-  end
-  
-  -- Find section and append
-  local section_found = false
-  local insert_index = #lines + 1
-  
-  for i, line in ipairs(lines) do
-    if line:match("^" .. vim.pesc(section_header)) then
-      section_found = true
-      -- Find next section or end of file
-      for j = i + 1, #lines do
-        if lines[j]:match("^##%s") then
-          insert_index = j
-          break
-        end
-      end
-      if insert_index == #lines + 1 then
-        insert_index = #lines + 1
-      end
-      break
-    end
-  end
-  
-  -- Insert content
-  table.insert(lines, insert_index, content)
-  
-  -- Write back
-  file = io.open(filepath, "w")
-  if file then
-    for _, line in ipairs(lines) do
-      file:write(line .. "\n")
-    end
-    file:close()
-    vim.notify("Content added", vim.log.levels.INFO)
-  end
-end
-
--- Select file and append task
-function M.select_and_append_task(category, task_line)
-  local category_num = ({project = "1", area = "2"})[category]
-  local path = string.format("%s/%s_%ss", M.config.base_path, category_num, category)
-  
-  -- Get list of files
-  local files = vim.fn.glob(path .. "/*.md", false, true)
-  
-  if #files == 0 then
-    vim.notify("No " .. category .. "s found", vim.log.levels.WARN)
-    return
-  end
-  
-  -- Extract just filenames for display
-  local filenames = {}
-  for _, file in ipairs(files) do
-    table.insert(filenames, vim.fn.fnamemodify(file, ":t:r"))
-  end
-  
-  vim.ui.select(filenames, {
-    prompt = "Select " .. category .. ": ",
-  }, function(choice, idx)
-    if choice and idx then
-      local filepath = files[idx]
-      
-      -- Append task to file
-      local file = io.open(filepath, "a")
-      if file then
-        file:write("\n" .. task_line .. "\n")
-        file:close()
-        vim.notify("Task added to " .. choice, vim.log.levels.INFO)
-      end
-    end
+  vim.ui.select(displays, { prompt = title }, function(_, idx)
+    if idx then on_choice(entries[idx].value) end
   end)
 end
 
--- Setup function
+--- Show a menu of { label, fn } pairs.
+local function menu(title, items)
+  local entries = {}
+  for _, item in ipairs(items) do
+    table.insert(entries, { display = item[1], value = item[2] })
+  end
+  pick(title, entries, function(fn)
+    if type(fn) == "function" then fn() end
+  end)
+end
+
+local function ask(prompt, default, on_done)
+  vim.ui.input({ prompt = prompt, default = default }, function(input)
+    if input and input ~= "" then on_done(input) end
+  end)
+end
+
+--- Pick an entity of a category. Offers creation when the category is empty.
+function M.pick_entity(category, prompt, on_choice)
+  local cat = category_of(category)
+  local slugs = M.entities(category)
+  if #slugs == 0 then
+    ask("No " .. cat.plural:lower() .. " yet. New " .. cat.label .. " name: ", nil, function(name)
+      M.create_entity(category, name, { open = false, on_done = on_choice })
+    end)
+    return
+  end
+  local entries = {}
+  for _, slug in ipairs(slugs) do
+    table.insert(entries, {
+      display = string.format("%-28s %s", slug, entity_summary(category, slug)),
+      value = slug,
+    })
+  end
+  pick(prompt or (cat.label .. ":"), entries, on_choice)
+end
+
+--- Pick any entity across every category. Passes (category, slug).
+function M.pick_any_entity(prompt, on_choice)
+  local entries = {}
+  for _, category in ipairs(CATEGORY_ORDER) do
+    local cat = category_of(category)
+    for _, slug in ipairs(M.entities(category)) do
+      table.insert(entries, {
+        display = string.format("%-9s %-28s %s", cat.label, slug, entity_summary(category, slug)),
+        value = { category = category, slug = slug },
+      })
+    end
+  end
+  if #entries == 0 then
+    notify("No projects, areas or resources yet", vim.log.levels.WARN)
+    return
+  end
+  pick(prompt or "PARA:", entries, function(value)
+    on_choice(value.category, value.slug)
+  end)
+end
+
+local function pick_category(prompt, on_choice)
+  local entries = {}
+  for _, name in ipairs(CATEGORY_ORDER) do
+    table.insert(entries, { display = category_of(name).label, value = name })
+  end
+  pick(prompt or "Category:", entries, on_choice)
+end
+
+-- ── Templates ───────────────────────────────────────────────────────────────
+
+local function page_template(category, name)
+  local stamp = now()
+  if category == "project" then
+    return table.concat({
+      "# Project: " .. name, "",
+      "Created: " .. stamp,
+      "Status: Active",
+      "Due:",
+      "Priority: Normal", "",
+      "## Objective", "",
+      "## Success criteria", "",
+      "## Tasks",
+      "- [ ]", "",
+      "## Notes", "",
+      "## Resources", "",
+      "## Retrospective",
+    }, "\n")
+  elseif category == "area" then
+    return table.concat({
+      "# Area: " .. name, "",
+      "Created: " .. stamp,
+      "Status: Active", "",
+      "## Overview", "",
+      "## Responsibilities", "",
+      "## Standards", "",
+      "## Recurring tasks",
+      "- [ ]", "",
+      "## Notes", "",
+      "## Resources",
+    }, "\n")
+  end
+  return table.concat({
+    "# Resource: " .. name, "",
+    "Created: " .. stamp,
+    "Source:",
+    "Tags:", "",
+    "## Summary", "",
+    "## Content", "",
+    "## References",
+  }, "\n")
+end
+
+local function note_template(title, category, parent)
+  return table.concat({
+    "# " .. title, "",
+    "Created: " .. now(),
+    "Category: " .. category_of(category).label,
+    "Parent: " .. parent,
+    "Tags:", "",
+    "---", "",
+    "## Summary", "",
+    "## Content", "",
+    "## References",
+  }, "\n")
+end
+
+-- ── Entities ────────────────────────────────────────────────────────────────
+
+--- Create a project, area or resource. opts: { bare, open, on_done }.
+function M.create_entity(category, name, opts)
+  opts = opts or {}
+  local cat = category_of(category)
+
+  local function build(chosen_name)
+    local slug = slugify(chosen_name)
+    if slug == "" then
+      notify("Name produces an empty slug: " .. chosen_name, vim.log.levels.ERROR)
+      return
+    end
+    local dir = entity_dir(category, slug)
+    local page = entity_page(category, slug)
+    local existed = vim.fn.isdirectory(dir) == 1
+    ensure_directory(dir)
+    if not opts.bare and vim.fn.filereadable(page) == 0 then
+      write_lines(page, vim.split(page_template(category, titlecase(slug)), "\n"))
+    end
+    if existed then
+      notify(cat.label .. " already exists: " .. slug, vim.log.levels.WARN)
+    else
+      notify(cat.label .. " created: " .. slug)
+    end
+    if opts.open ~= false then
+      if vim.fn.filereadable(page) == 1 then open_file(page) end
+    end
+    if opts.on_done then opts.on_done(slug) end
+  end
+
+  if name and name ~= "" then
+    build(name)
+  else
+    ask("New " .. cat.label .. " name: ", nil, build)
+  end
+end
+
+--- Open an entity page, or pick among its files when it has no page.
+function M.open_entity(category, slug)
+  local function open(chosen)
+    promote_entity(category, chosen)
+    local page = entity_page(category, chosen)
+    if vim.fn.filereadable(page) == 1 then
+      open_file(page)
+      return
+    end
+    local files = vim.fn.glob(entity_dir(category, chosen) .. "/**/*.md", false, true)
+    if #files == 0 then
+      write_lines(page, vim.split(page_template(category, titlecase(chosen)), "\n"))
+      open_file(page)
+      return
+    end
+    local root = entity_dir(category, chosen) .. "/"
+    local entries = {}
+    for _, file in ipairs(files) do
+      table.insert(entries, { display = file:gsub("^" .. vim.pesc(root), ""), value = file })
+    end
+    pick("Open in " .. chosen .. ":", entries, open_file)
+  end
+
+  if slug then open(slug) else M.pick_entity(category, nil, open) end
+end
+
+--- Create a note inside an entity of a category.
+function M.create_note_in(category, slug, title)
+  local function build(chosen_slug, chosen_title)
+    promote_entity(category, chosen_slug)
+    local dir = entity_notes_dir(category, chosen_slug)
+    ensure_directory(dir)
+    local path = dir .. "/" .. slugify(chosen_title) .. ".md"
+    if vim.fn.filereadable(path) == 1 then
+      notify("Note already exists: " .. path, vim.log.levels.WARN)
+    else
+      write_lines(path, vim.split(note_template(chosen_title, category, chosen_slug), "\n"))
+      notify("Note created in " .. chosen_slug)
+    end
+    open_file(path)
+  end
+
+  local function with_slug(chosen_slug)
+    if title and title ~= "" then
+      build(chosen_slug, title)
+    else
+      ask("Note title: ", nil, function(input) build(chosen_slug, input) end)
+    end
+  end
+
+  if slug then with_slug(slug) else M.pick_entity(category, nil, with_slug) end
+end
+
+--- Pick a category, then an entity, then create a note in it.
+function M.create_note()
+  pick_category("Note in which category?", function(category)
+    M.create_note_in(category)
+  end)
+end
+
+--- List the notes of an entity and open the chosen one.
+function M.browse_notes(category, slug)
+  local function browse(chosen)
+    local notes = M.notes_of(category, chosen)
+    if #notes == 0 then
+      notify("No notes in " .. chosen .. " yet", vim.log.levels.WARN)
+      return
+    end
+    local entries = {}
+    for _, note in ipairs(notes) do
+      table.insert(entries, { display = note.name, value = note.path })
+    end
+    pick("Notes in " .. chosen .. ":", entries, open_file)
+  end
+
+  if slug then browse(slug) else M.pick_entity(category, nil, browse) end
+end
+
+--- List every entity of a category and open the chosen one.
+function M.list_entities(category)
+  local cat = category_of(category)
+  local slugs = M.entities(category)
+  if #slugs == 0 then
+    notify("No " .. cat.plural:lower() .. " yet", vim.log.levels.WARN)
+    return
+  end
+  M.pick_entity(category, cat.plural .. ":", function(slug)
+    M.open_entity(category, slug)
+  end)
+end
+
+--- Move a whole entity directory into the archive.
+function M.archive_entity(category, slug)
+  local function archive(chosen)
+    promote_entity(category, chosen)
+    local src = entity_dir(category, chosen)
+    local dst = archive_root() .. "/" .. chosen
+    if vim.fn.isdirectory(dst) == 1 or vim.fn.filereadable(dst) == 1 then
+      dst = archive_root() .. "/" .. chosen .. "_" .. os.date("%Y%m%d_%H%M%S")
+    end
+    ensure_directory(archive_root())
+    if vim.fn.rename(src, dst) == 0 then
+      notify("Archived " .. chosen .. " to " .. dst)
+    else
+      notify("Could not archive " .. chosen, vim.log.levels.ERROR)
+    end
+  end
+
+  local function confirm(chosen)
+    pick("Archive " .. chosen .. "?", {
+      { display = "No", value = false },
+      { display = "Yes, archive it", value = true },
+    }, function(yes) if yes then archive(chosen) end end)
+  end
+
+  if slug then confirm(slug) else M.pick_entity(category, "Archive:", confirm) end
+end
+
+function M.archive_any_entity()
+  M.pick_any_entity("Archive:", function(category, slug)
+    M.archive_entity(category, slug)
+  end)
+end
+
+-- ── Log ─────────────────────────────────────────────────────────────────────
+
+local function log_target(category, slug)
+  if not category then
+    return {
+      path = M.config.log_file,
+      archive = M.config.log_archive_dir,
+      label = "global",
+    }
+  end
+  promote_entity(category, slug)
+  return {
+    path = entity_log(category, slug),
+    archive = entity_log_archive(category, slug),
+    label = category_of(category).label:lower() .. " " .. slug,
+  }
+end
+
+local function append_log(target, text)
+  ensure_file(target.path, "# Log\nCreated: " .. now() .. "\n\n")
+  append_line(target.path, now() .. " - " .. text)
+  notify("Log entry added to " .. target.label)
+end
+
+function M.open_log()
+  ensure_file(M.config.log_file, "# Log\nCreated: " .. now() .. "\n\n")
+  refresh_or_open(M.config.log_file, true)
+end
+
+function M.add_log_entry()
+  ask("Log entry: ", nil, function(text)
+    local target = log_target(nil, nil)
+    append_log(target, text)
+    refresh_or_open(target.path, true)
+  end)
+end
+
+--- Append to the log of a project, area or resource.
+function M.add_entity_log_entry()
+  M.pick_any_entity("Log entry for:", function(category, slug)
+    ask("Log entry: ", nil, function(text)
+      local target = log_target(category, slug)
+      append_log(target, text)
+    end)
+  end)
+end
+
+function M.open_entity_log(category, slug)
+  local function open(chosen)
+    local target = log_target(category, chosen)
+    ensure_file(target.path, "# Log\nCreated: " .. now() .. "\n\n")
+    refresh_or_open(target.path, true)
+  end
+  if slug then open(slug) else M.pick_entity(category, "Open log of:", open) end
+end
+
+local function archive_log_file(target)
+  ask("Archive entries before date (YYYY-MM-DD): ", today(), function(cutoff)
+    if not cutoff:match("^%d%d%d%d%-%d%d%-%d%d$") then
+      notify("Invalid date format. Use YYYY-MM-DD", vim.log.levels.ERROR)
+      return
+    end
+    if vim.fn.filereadable(target.path) == 0 then
+      notify("No log for " .. target.label, vim.log.levels.ERROR)
+      return
+    end
+
+    local keep, moved = {}, {}
+    for _, line in ipairs(read_lines(target.path)) do
+      local stamp = line:match("^(%d%d%d%d%-%d%d%-%d%d)")
+      if stamp and stamp < cutoff then
+        table.insert(moved, line)
+      else
+        table.insert(keep, line)
+      end
+    end
+
+    if #moved == 0 then
+      notify("No entries before " .. cutoff .. " in " .. target.label)
+      return
+    end
+
+    ensure_directory(target.archive)
+    local path = string.format("%s/log_archive_%s.md", target.archive, os.date("%Y%m%d_%H%M%S"))
+    local header = {
+      "# Archived Log Entries",
+      "Archived: " .. now(),
+      "Source: " .. target.label,
+      "Entries before: " .. cutoff,
+      "",
+    }
+    write_lines(path, vim.list_extend(header, moved))
+    write_lines(target.path, keep)
+    notify(string.format("Archived %d %s from %s", #moved, plural("entry", #moved), target.label))
+    refresh_or_open(target.path, true)
+  end)
+end
+
+function M.archive_log()
+  archive_log_file(log_target(nil, nil))
+end
+
+function M.archive_entity_log()
+  M.pick_any_entity("Archive log of:", function(category, slug)
+    archive_log_file(log_target(category, slug))
+  end)
+end
+
+function M.insert_log_template()
+  local template = now() .. " - "
+  local row, col = unpack(vim.api.nvim_win_get_cursor(0))
+  local line = vim.api.nvim_get_current_line()
+  vim.api.nvim_set_current_line(line:sub(1, col) .. template .. line:sub(col + 1))
+  vim.api.nvim_win_set_cursor(0, { row, col + #template })
+  vim.cmd("startinsert!")
+end
+
+-- ── Tasks ───────────────────────────────────────────────────────────────────
+
+local function priority_entries()
+  local keys = {}
+  for key in pairs(M.config.priority_order) do
+    table.insert(keys, key)
+  end
+  table.sort(keys)
+  local entries = {}
+  for _, key in ipairs(keys) do
+    table.insert(entries, { display = key .. " - " .. M.config.priority_order[key], value = key })
+  end
+  return entries
+end
+
+local function is_task(line)
+  return line:match("^%[%w%] %- %[[ x]%]") ~= nil or line:match("^%- %[[ x]%]") ~= nil
+end
+
+local function sort_tasks_in_file()
+  local header, tasks = {}, {}
+  local in_header = true
+  for _, line in ipairs(read_lines(M.config.tasks_file)) do
+    if in_header and is_task(line) then in_header = false end
+    if in_header then
+      table.insert(header, line)
+    elseif line ~= "" then
+      table.insert(tasks, line)
+    end
+  end
+  table.sort(tasks)
+  write_lines(M.config.tasks_file, vim.list_extend(header, tasks))
+end
+
+function M.open_tasks()
+  ensure_file(M.config.tasks_file, "# Tasks\nCreated: " .. now() .. "\n\n")
+  refresh_or_open(M.config.tasks_file, false)
+end
+
+function M.add_task_to_file(task_line)
+  ensure_file(M.config.tasks_file, "# Tasks\nCreated: " .. now() .. "\n\n")
+  append_line(M.config.tasks_file, task_line)
+  sort_tasks_in_file()
+  refresh_or_open(M.config.tasks_file, false)
+  notify("Task added")
+end
+
+local function build_task_line(priority, description, link)
+  local line
+  if priority == "C" then
+    line = "- [ ] " .. description
+  else
+    line = string.format("[%s] - [ ] %s", priority, description)
+  end
+  if link then line = line .. " (" .. link .. ")" end
+  return line
+end
+
+--- Add a task. When link_to is true, also ask which entity it belongs to.
+function M.add_task(link_to)
+  ask("Task description: ", nil, function(description)
+    pick("Priority:", priority_entries(), function(priority)
+      if not link_to then
+        M.add_task_to_file(build_task_line(priority, description, nil))
+        return
+      end
+      M.pick_any_entity("Link task to:", function(category, slug)
+        M.add_task_to_file(build_task_line(priority, description, category .. " " .. slug))
+      end)
+    end)
+  end)
+end
+
+function M.add_linked_task()
+  M.add_task(true)
+end
+
+function M.archive_done_tasks()
+  if vim.fn.filereadable(M.config.tasks_file) == 0 then
+    notify("Tasks file not found", vim.log.levels.ERROR)
+    return
+  end
+  local active, done = {}, {}
+  for _, line in ipairs(read_lines(M.config.tasks_file)) do
+    if line:match("%[x%]") then
+      table.insert(done, line)
+    else
+      table.insert(active, line)
+    end
+  end
+  if #done == 0 then
+    notify("No completed tasks to archive")
+    return
+  end
+  ensure_file(M.config.tasks_archive_file, "# Archived Tasks\n\n")
+  append_line(M.config.tasks_archive_file, "\n## Archived on " .. now())
+  for _, line in ipairs(done) do
+    append_line(M.config.tasks_archive_file, line)
+  end
+  write_lines(M.config.tasks_file, active)
+  notify(string.format("Archived %d completed %s", #done, plural("task", #done)))
+  refresh_or_open(M.config.tasks_file, false)
+end
+
+function M.toggle_task()
+  local line = vim.api.nvim_get_current_line()
+  local new_line
+  if line:match("%- %[ %]") then
+    new_line = line:gsub("%- %[ %]", "- [x]", 1)
+  elseif line:match("%- %[x%]") then
+    new_line = line:gsub("%- %[x%]", "- [ ]", 1)
+  else
+    return
+  end
+  vim.api.nvim_set_current_line(new_line)
+  if vim.fn.expand("%:p") == M.config.tasks_file then
+    vim.cmd("silent write")
+    sort_tasks_in_file()
+    vim.cmd("edit!")
+  end
+end
+
+function M.insert_task_template()
+  pick("Priority:", priority_entries(), function(priority)
+    local template = priority == "C" and "- [ ] " or string.format("[%s] - [ ] ", priority)
+    local row, col = unpack(vim.api.nvim_win_get_cursor(0))
+    local line = vim.api.nvim_get_current_line()
+    vim.api.nvim_set_current_line(line:sub(1, col) .. template .. line:sub(col + 1))
+    vim.api.nvim_win_set_cursor(0, { row, col + #template })
+    vim.cmd("startinsert!")
+  end)
+end
+
+--- Show tasks in a picker. filter: nil, "open", "done", or an entity link.
+function M.list_tasks(filter)
+  if vim.fn.filereadable(M.config.tasks_file) == 0 then
+    notify("No tasks file yet", vim.log.levels.WARN)
+    return
+  end
+  local entries = {}
+  for idx, line in ipairs(read_lines(M.config.tasks_file)) do
+    if is_task(line) then
+      local done = line:match("%[x%]") ~= nil
+      local keep = true
+      if filter == "open" then keep = not done end
+      if filter == "done" then keep = done end
+      if keep then
+        table.insert(entries, { display = line, value = idx })
+      end
+    end
+  end
+  if #entries == 0 then
+    notify("No matching tasks")
+    return
+  end
+  pick("Tasks:", entries, function(lnum)
+    M.open_tasks()
+    vim.api.nvim_win_set_cursor(0, { lnum, 0 })
+  end)
+end
+
+-- ── Search and statistics ───────────────────────────────────────────────────
+
+function M.search_notes_by_name()
+  local ok_builtin, builtin = pcall(require, "telescope.builtin")
+  if ok_builtin then
+    builtin.find_files({ cwd = M.config.base_path, prompt_title = "PARA notes by name" })
+    return
+  end
+  ask("Search note names for: ", nil, function(query)
+    vim.cmd(string.format("noautocmd vimgrep /%s/j %s/**/*.md", vim.fn.escape(query, "/\\"), M.config.base_path))
+    vim.cmd("copen")
+  end)
+end
+
+function M.search_notes_by_content()
+  local ok_builtin, builtin = pcall(require, "telescope.builtin")
+  if ok_builtin then
+    builtin.live_grep({ cwd = M.config.base_path, prompt_title = "PARA notes by content" })
+    return
+  end
+  ask("Search note contents for: ", nil, function(query)
+    vim.cmd(string.format("noautocmd vimgrep /%s/j %s/**/*.md", vim.fn.escape(query, "/\\"), M.config.base_path))
+    vim.cmd("copen")
+  end)
+end
+
+local function show_lines(title, lines)
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+  vim.bo[buf].modifiable = false
+  vim.bo[buf].filetype = "markdown"
+  vim.bo[buf].bufhidden = "wipe"
+
+  local width = 0
+  for _, line in ipairs(lines) do
+    width = math.max(width, #line)
+  end
+  width = math.min(math.max(width + 4, 40), vim.o.columns - 8)
+  local height = math.min(#lines + 2, vim.o.lines - 8)
+
+  local win = vim.api.nvim_open_win(buf, true, {
+    relative = "editor",
+    width = width,
+    height = height,
+    row = math.floor((vim.o.lines - height) / 2) - 1,
+    col = math.floor((vim.o.columns - width) / 2),
+    style = "minimal",
+    border = "rounded",
+    title = " " .. title .. " ",
+    title_pos = "center",
+  })
+  vim.wo[win].wrap = false
+  for _, key in ipairs({ "q", "<Esc>" }) do
+    vim.keymap.set("n", key, function()
+      if vim.api.nvim_win_is_valid(win) then vim.api.nvim_win_close(win, true) end
+    end, { buffer = buf, nowait = true, silent = true })
+  end
+end
+
+function M.stats()
+  local lines = { "# PARA statistics", "", M.config.base_path, "", "## Entities", "" }
+  local total_notes = 0
+  for _, category in ipairs(CATEGORY_ORDER) do
+    local cat = category_of(category)
+    local slugs = M.entities(category)
+    local notes = 0
+    for _, slug in ipairs(slugs) do
+      notes = notes + count_notes(category, slug)
+    end
+    total_notes = total_notes + notes
+    table.insert(lines, string.format("  %-12s %3d  (%d %s)", cat.plural, #slugs, notes, plural("note", notes)))
+  end
+  local archived = #vim.fn.glob(archive_root() .. "/*", false, true)
+  table.insert(lines, string.format("  %-12s %3d", "Archive", archived))
+  table.insert(lines, string.format("  %-12s %3d", "Notes", total_notes))
+
+  local log_entries = 0
+  for _, line in ipairs(read_lines(M.config.log_file)) do
+    if line:match("^%d%d%d%d%-%d%d%-%d%d") then log_entries = log_entries + 1 end
+  end
+  vim.list_extend(lines, { "", "## Log", "", string.format("  %-12s %3d", "Global", log_entries) })
+
+  local pending, done, critical, high = 0, 0, 0, 0
+  for _, line in ipairs(read_lines(M.config.tasks_file)) do
+    if is_task(line) then
+      if line:match("%[x%]") then done = done + 1 else pending = pending + 1 end
+      if line:match("^%[A%]") then critical = critical + 1 end
+      if line:match("^%[B%]") then high = high + 1 end
+    end
+  end
+  vim.list_extend(lines, {
+    "", "## Tasks", "",
+    string.format("  %-12s %3d", "Pending", pending),
+    string.format("  %-12s %3d", "Completed", done),
+    string.format("  %-12s %3d", "Critical", critical),
+    string.format("  %-12s %3d", "High", high),
+    "", "Press q to close",
+  })
+  show_lines("PARA", lines)
+end
+
+-- ── Menus ───────────────────────────────────────────────────────────────────
+
+function M.category_menu(category)
+  local cat = category_of(category)
+  menu(cat.plural .. ":", {
+    { "List " .. cat.plural:lower(),        function() M.list_entities(category) end },
+    { "Open " .. cat.label:lower(),         function() M.open_entity(category) end },
+    { "New " .. cat.label:lower(),          function() M.create_entity(category) end },
+    { "New note in " .. cat.label:lower(),  function() M.create_note_in(category) end },
+    { "Browse notes of " .. cat.label:lower(), function() M.browse_notes(category) end },
+    { "Open log of " .. cat.label:lower(),  function() M.open_entity_log(category) end },
+    { "Archive " .. cat.label:lower(),      function() M.archive_entity(category) end },
+    { "Back",                                function() M.menu() end },
+  })
+end
+
+function M.tasks_menu()
+  menu("Tasks:", {
+    { "List all tasks",      function() M.list_tasks(nil) end },
+    { "List open tasks",     function() M.list_tasks("open") end },
+    { "List done tasks",     function() M.list_tasks("done") end },
+    { "Add task",            function() M.add_task(false) end },
+    { "Add task linked to an entity", function() M.add_task(true) end },
+    { "Archive done tasks",  function() M.archive_done_tasks() end },
+    { "Open tasks file",     function() M.open_tasks() end },
+    { "Back",                function() M.menu() end },
+  })
+end
+
+function M.log_menu()
+  menu("Log:", {
+    { "Open global log",             function() M.open_log() end },
+    { "Add global log entry",        function() M.add_log_entry() end },
+    { "Archive global log entries",  function() M.archive_log() end },
+    { "Add entry to an entity log",  function() M.add_entity_log_entry() end },
+    { "Open an entity log",          function() M.pick_any_entity("Open log of:", function(c, s) M.open_entity_log(c, s) end) end },
+    { "Archive an entity log",       function() M.archive_entity_log() end },
+    { "Back",                        function() M.menu() end },
+  })
+end
+
+function M.menu()
+  menu("PARA:", {
+    { "Find and open anything",  function() M.pick_any_entity("Open:", function(c, s) M.open_entity(c, s) end) end },
+    { "New note",                function() M.create_note() end },
+    { "New project, area or resource", function()
+        pick_category("New what?", function(category) M.create_entity(category) end)
+      end },
+    { "Projects",                function() M.category_menu("project") end },
+    { "Areas",                   function() M.category_menu("area") end },
+    { "Resources",               function() M.category_menu("resource") end },
+    { "Tasks",                   function() M.tasks_menu() end },
+    { "Log",                     function() M.log_menu() end },
+    { "Search by name",          function() M.search_notes_by_name() end },
+    { "Search by content",       function() M.search_notes_by_content() end },
+    { "Archive something",       function() M.archive_any_entity() end },
+    { "Statistics",              function() M.stats() end },
+  })
+end
+
+-- ── User commands ───────────────────────────────────────────────────────────
+
+local SUBCOMMANDS = {
+  menu = function() M.menu() end,
+  find = function() M.pick_any_entity("Open:", function(c, s) M.open_entity(c, s) end) end,
+  projects = function() M.category_menu("project") end,
+  areas = function() M.category_menu("area") end,
+  resources = function() M.category_menu("resource") end,
+  note = function() M.create_note() end,
+  tasks = function() M.tasks_menu() end,
+  log = function() M.log_menu() end,
+  stats = function() M.stats() end,
+  search = function() M.search_notes_by_content() end,
+}
+
+local function register_commands()
+  vim.api.nvim_create_user_command("Para", function(opts)
+    local name = opts.args ~= "" and opts.args or "menu"
+    local fn = SUBCOMMANDS[name]
+    if fn then fn() else notify("Unknown subcommand: " .. name, vim.log.levels.ERROR) end
+  end, {
+    nargs = "?",
+    desc = "PARA menu and subcommands",
+    complete = function(lead)
+      local out = {}
+      for name in pairs(SUBCOMMANDS) do
+        if name:find(lead, 1, true) == 1 then table.insert(out, name) end
+      end
+      table.sort(out)
+      return out
+    end,
+  })
+end
+
+-- ── Setup ───────────────────────────────────────────────────────────────────
+
 function M.setup(opts)
   M.config = vim.tbl_deep_extend("force", M.config, opts or {})
-  
-  -- Set derived paths if not explicitly provided
-  if not M.config.log_file then
-    M.config.log_file = M.config.base_path .. "/log.md"
-  end
-  if not M.config.log_archive_dir then
-    M.config.log_archive_dir = M.config.base_path .. "/logs/archive"
-  end
-  if not M.config.tasks_file then
-    M.config.tasks_file = M.config.base_path .. "/tasks.md"
-  end
-  if not M.config.tasks_archive_file then
-    M.config.tasks_archive_file = M.config.base_path .. "/tasks_archive.md"
-  end
-  
-  -- Initialize directories
+  M.config.base_path = vim.fn.expand(M.config.base_path)
+  M.config.log_file = M.config.log_file or (M.config.base_path .. "/log.md")
+  M.config.log_archive_dir = M.config.log_archive_dir or (M.config.base_path .. "/logs/archive")
+  M.config.tasks_file = M.config.tasks_file or (M.config.base_path .. "/tasks.md")
+  M.config.tasks_archive_file = M.config.tasks_archive_file or (M.config.base_path .. "/tasks_archive.md")
+
   M.init_directories()
-  
-  -- Set up keymaps
-  local keymaps = M.config.keymaps
-  
-  -- Log management
-  vim.keymap.set("n", keymaps.open_log, M.open_log, { desc = "Open log file" })
-  vim.keymap.set("n", keymaps.add_log, M.add_log_entry, { desc = "Add log entry" })
-  vim.keymap.set("n", keymaps.archive_log, M.archive_log, { desc = "Archive log entries" })
-  vim.keymap.set("n", keymaps.insert_log_template, M.insert_log_template, { desc = "Insert log entry template" })
-  
-  -- Task management
-  vim.keymap.set("n", keymaps.open_tasks, M.open_tasks, { desc = "Open tasks file" })
-  vim.keymap.set("n", keymaps.add_task, M.add_task, { desc = "Add task" })
-  vim.keymap.set("n", keymaps.archive_done_tasks, M.archive_done_tasks, { desc = "Archive done tasks" })
-  vim.keymap.set("n", keymaps.toggle_task, M.toggle_task, { desc = "Toggle task done/undone" })
-  vim.keymap.set("n", keymaps.insert_task_template, M.insert_task_template, { desc = "Insert task template" })
-  
-  -- Search and archive
-  vim.keymap.set("n", keymaps.search_by_name, M.search_notes_by_name, { desc = "Search notes by name" })
-  vim.keymap.set("n", keymaps.search_by_content, M.search_notes_by_content, { desc = "Search notes by content" })
-  vim.keymap.set("n", keymaps.archive_project, M.archive_project, { desc = "Archive project" })
-  
-  -- Set up autocmds for task priority coloring
-  vim.api.nvim_create_autocmd({"BufRead", "BufNewFile"}, {
-    pattern = {"*.md"},
+  register_commands()
+
+  local keys = M.config.keymaps
+  local bindings = {
+    { keys.menu,                 M.menu,                    "PARA menu" },
+    { keys.find_entity,          function() M.pick_any_entity("Open:", function(c, s) M.open_entity(c, s) end) end, "Find project, area or resource" },
+    { keys.new_entity,           function() pick_category("New what?", function(c) M.create_entity(c) end) end, "New project, area or resource" },
+    { keys.new_note,             M.create_note,             "New note in an entity" },
+    { keys.projects,             function() M.category_menu("project") end,  "Projects menu" },
+    { keys.areas,                function() M.category_menu("area") end,     "Areas menu" },
+    { keys.resources,            function() M.category_menu("resource") end, "Resources menu" },
+    { keys.entity_log,           M.add_entity_log_entry,    "Add log entry to an entity" },
+    { keys.archive_entity,       M.archive_any_entity,      "Archive a project, area or resource" },
+    { keys.open_log,             M.open_log,                "Open global log" },
+    { keys.add_log,              M.add_log_entry,           "Add global log entry" },
+    { keys.archive_log,          M.archive_log,             "Archive global log entries" },
+    { keys.insert_log_template,  M.insert_log_template,     "Insert log entry template" },
+    { keys.open_tasks,           M.open_tasks,              "Open tasks file" },
+    { keys.add_task,             function() M.add_task(false) end, "Add task" },
+    { keys.archive_done_tasks,   M.archive_done_tasks,      "Archive done tasks" },
+    { keys.insert_task_template, M.insert_task_template,    "Insert task template" },
+    { keys.toggle_task,          M.toggle_task,             "Toggle task done or undone" },
+    { keys.search_by_name,       M.search_notes_by_name,    "Search notes by name" },
+    { keys.search_by_content,    M.search_notes_by_content, "Search notes by content" },
+    { keys.stats,                M.stats,                   "PARA statistics" },
+  }
+  for _, binding in ipairs(bindings) do
+    if binding[1] then
+      vim.keymap.set("n", binding[1], binding[2], { desc = binding[3], silent = true })
+    end
+  end
+
+  vim.api.nvim_create_autocmd({ "BufRead", "BufNewFile" }, {
+    pattern = { M.config.base_path .. "/**/*.md", M.config.base_path .. "/*.md" },
     callback = function()
-      -- Color priority prefixes
       vim.fn.matchadd("Error", "\\[A\\]")
       vim.fn.matchadd("WarningMsg", "\\[B\\]")
       vim.fn.matchadd("Question", "\\[C\\]")

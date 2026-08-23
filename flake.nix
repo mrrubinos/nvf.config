@@ -22,17 +22,28 @@
       let
         pkgs = inputs.nixpkgs.legacyPackages.${system};
 
-        nvim = (inputs.nvf.lib.neovimConfiguration {
-          inherit pkgs;
-          modules = [ (import ./config.nix { inherit inputs pkgs; }) ];
-        }).neovim;
+        # Baked into init.lua and the para wrapper, so a launch with no
+        # environment at all still finds the store. PARA_BASE overrides it.
+        defaultParaBase = "~/Documents/PARA";
 
-        para-cli = pkgs.writeShellScriptBin "para" ''
-          export PARA_BASE="''${PARA_BASE:-~/Documents/PARA}"
-          export PARA_LOGS="$PARA_BASE/logs"
-          exec ${pkgs.bash}/bin/bash ${./para} "$@"
-        '';
+        mkNvim = { paraBase ? defaultParaBase }:
+          (inputs.nvf.lib.neovimConfiguration {
+            inherit pkgs;
+            modules = [ (import ./config.nix { inherit inputs pkgs paraBase; }) ];
+          }).neovim;
+
+        mkPara = { paraBase ? defaultParaBase }:
+          pkgs.writeShellScriptBin "para" ''
+            export PARA_BASE="''${PARA_BASE:-${paraBase}}"
+            export PARA_LOGS="$PARA_BASE/logs"
+            exec ${pkgs.bash}/bin/bash ${./para} "$@"
+          '';
+
+        nvim = mkNvim { };
+        para-cli = mkPara { };
       in {
+        lib = { inherit mkNvim mkPara defaultParaBase; };
+
         packages.default = nvim;
         packages.para-cli = para-cli;
 

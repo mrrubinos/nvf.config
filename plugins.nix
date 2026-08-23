@@ -1,4 +1,4 @@
-{ inputs, pkgs, lib }:
+{ inputs, pkgs, lib, paraBase }:
 { ... }:
 let
   # Helper for embedding raw lua values inside nix attrsets passed to setup().
@@ -70,6 +70,7 @@ in {
           { icon = " "; desc = "Grep";  key = "/"; keymap = "<leader>fg"; action = "Telescope live_grep"; }
           { icon = " "; desc = "Log";   key = "l"; keymap = "<leader>pl"; action = "lua require('para').open_log()"; }
           { icon = " "; desc = "Tasks"; key = "t"; keymap = "<leader>pt"; action = "lua require('para').open_tasks()"; }
+          { icon = " "; desc = "PARA";  key = "p"; keymap = "<leader>pp"; action = "lua require('para').menu()"; }
           { icon = " "; desc = "Notes"; key = "s"; keymap = "<leader>ps"; action = "lua require('para').search_notes_by_content()"; }
           { icon = " "; desc = "Quit";  key = "q"; action = "qa"; }
         ];
@@ -153,15 +154,26 @@ in {
       enable = true;
       register = {
         "<leader>p"   = "󰂮 PARA System";
-        "<leader>pl"  = "Open log file";
-        "<leader>pla" = "Add log entry";
-        "<leader>plx" = "Archive log entries";
+        "<leader>pp"  = "PARA menu";
+        "<leader>pf"  = "Find project/area/resource";
+        "<leader>pN"  = "New project/area/resource";
+        "<leader>pc"  = "New note in an entity";
+        "<leader>pP"  = "Projects menu";
+        "<leader>pA"  = "Areas menu";
+        "<leader>pR"  = "Resources menu";
+        "<leader>pe"  = "Add log entry to an entity";
+        "<leader>px"  = "Archive project/area/resource";
+        "<leader>pl"  = "Open global log";
+        "<leader>pla" = "Add global log entry";
+        "<leader>plx" = "Archive global log entries";
+        "<leader>pli" = "Insert log entry template";
         "<leader>pt"  = "Open tasks file";
         "<leader>pta" = "Add task";
         "<leader>ptx" = "Archive done tasks";
+        "<leader>pti" = "Insert task template";
         "<leader>pn"  = "Search notes by name";
         "<leader>ps"  = "Search notes by content";
-        "<leader>px"  = "Archive project";
+        "<leader>pS"  = "PARA statistics";
         "<leader>tt"  = "Toggle task done/undone";
         "<leader>t"   = " Typst";
         "<leader>tp"  = "Preview PDF";
@@ -423,10 +435,7 @@ in {
       -- PARA Method Task & Note Management Setup
       local pkm_path = vim.fn.getenv("PARA_BASE")
       if pkm_path == vim.NIL or pkm_path == "" then
-        pkm_path = vim.fn.getenv("NIXVIM_PKM_PATH")
-      end
-      if pkm_path == vim.NIL or pkm_path == "" then
-        pkm_path = "~/Documents/PARA"
+        pkm_path = "${paraBase}"
       end
       pkm_path = vim.fn.expand(pkm_path)
 
