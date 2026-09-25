@@ -247,6 +247,19 @@ in {
         lsp.enable = true;
       };
 
+      go = {
+        enable = true;
+        treesitter.enable = true;
+        lsp.enable = true;
+        format = {
+          enable = true;
+          type = [ "goimports" ];
+        };
+        dap.enable = true;
+        extraDiagnostics.enable = true;
+        extensions.gopher-nvim.enable = true;
+      };
+
       markdown = {
         enable = true;
         lsp.enable = true;
@@ -284,6 +297,9 @@ in {
       # ocaml-lsp drives ocamlformat over RPC to pretty-print types in hover
       # and type-enclosing output; unrelated to format-on-save.
       pkgs.ocamlPackages.ocamlformat
+
+      # gopls root detection runs `go env GOMOD`, so the toolchain must be on Neovim's PATH.
+      pkgs.go
     ];
 
     # ── Extra plugins not wrapped by nvf ─────────────────────────────────────
